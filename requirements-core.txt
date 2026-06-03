@@ -1,0 +1,6 @@
+﻿anthropic>=0.96.0
+python-dotenv
+httpx
+chromadb
+pyttsx3
+requests
