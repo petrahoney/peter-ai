@@ -11,4 +11,4 @@ __pycache__/
 data/
 content/
 crew_output.txt
-client_secrets.json
+client_secrets.json"error_log.txt" 
