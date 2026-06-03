@@ -1,15 +1,30 @@
+# -*- coding: utf-8 -*-
+from peter_identity import (
+    BOOT_BANNER,
+    get_greeting,
+    detect_domain_and_get_prompt,
+    format_response_luxury,
+    PETER_CONFIG
+)
+
 # ============================================================
 #   PETER AI v2.0 — Complete System Final
 #   Self-Heal + Code Engine + CrewAI + Voice + Vision + Memory
 # ============================================================
 
 from dotenv import load_dotenv
+from quantex_module import run_quantex_menu
 import os
 import sys
 import warnings
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
 load_dotenv()
+
+USER_NAME        = os.getenv("USER_NAME", "Tjerlang")
+ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
+ELEVENLABS_KEY   = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "TIXYCOMzK2Vw9OZovSLs")
 
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
 ELEVENLABS_KEY   = os.getenv("ELEVENLABS_API_KEY", "")
@@ -64,36 +79,18 @@ except Exception as e:
 # ============================================================
 # VOICE OUTPUT
 # ============================================================
-def peter_speak(text: str):
-    if not text or not text.strip():
-        return
+def peter_speak(text: str, play: bool = True):
+    """PETER berbicara — pakai peter_tts engine"""
     try:
-        from elevenlabs import ElevenLabs, VoiceSettings
-        client = ElevenLabs(api_key=ELEVENLABS_KEY)
-        audio  = client.text_to_speech.convert(
-            voice_id       = ELEVENLABS_VOICE,
-            text           = text[:500],
-            model_id       = "eleven_multilingual_v2",
-            voice_settings = VoiceSettings(
-                stability        = 0.45,
-                similarity_boost = 0.82,
-                style            = 0.5,
-                use_speaker_boost= True
-            )
-        )
-        audio_file = "C:\\peter-ai\\data\\outputs\\peter_voice.mp3"
-        with open(audio_file, "wb") as f:
-            for chunk in audio:
-                if chunk:
-                    f.write(chunk)
-        os.startfile(audio_file)
+        from peter_tts import peter_speak as tts_speak
+        tts_speak(text, play=play)
     except Exception as e:
-        print(f"[PETER Voice] Error: {e}")
+        print(f"[TTS] Error: {e}")
         try:
             import pyttsx3
             engine = pyttsx3.init()
             engine.setProperty('rate', 150)
-            engine.say(text[:300])
+            engine.say(text[:200])
             engine.runAndWait()
         except Exception:
             pass
@@ -226,75 +223,35 @@ def peter_wait_wakeword():
 # ============================================================
 # CHAT
 # ============================================================
-def chat_peter(message: str, use_memory: bool = True) -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    context_str = ""
-    history     = []
-
-    if use_memory and MEMORY_OK and memory:
-        ctx         = memory.build_context(message)
-        context_str = ctx["context_string"]
-        history     = ctx["history"]
-
-    system = f"""Kamu adalah PETER — Personal Enhanced Thinking & Execution Robot.
-Asisten AI pribadi milik {USER_NAME}.
-
-IDENTITAS:
-- Kepribadian: Cerdas, analitis, proaktif seperti JARVIS
-- Bahasa: Indonesia (default)
-- Gaya: Profesional dan friendly
-
-KEMAMPUAN:
-1. Analisis mendalam dengan data dan fakta
-2. Content creation — script, caption, artikel viral
-3. Strategi monetisasi konten digital
-4. Python coding dan otomasi apps
-5. YouTube, Instagram, TikTok growth strategy
-6. Riset topik viral dan SEO optimization
-
-CARA MENJAWAB:
-- SELALU detail, lengkap, dan actionable
-- Gunakan angka dan contoh konkret
-- Berikan langkah yang bisa langsung dilakukan
-- Akhiri dengan next step
-
-KONTEKS {USER_NAME}:
-- Membangun bisnis konten digital
-- Target: passive income dari YouTube + IG + TikTok
-- Tools: PETER AI, Python, CrewAI, Claude
-
-{f'MEMORY:{chr(10)}{context_str}' if context_str else ''}"""
-
-    messages = []
-    for h in history[-10:]:
-        messages.append({
-            "role"   : h["role"],
-            "content": h["content"]
-        })
-    messages.append({"role": "user", "content": message})
-
-    response = client.messages.create(
-        model      = "claude-sonnet-4-6",
-        max_tokens = 8096,
-        system     = system,
-        messages   = messages
-    )
-    answer = response.content[0].text
-
-    if use_memory and MEMORY_OK and memory:
-        memory.add_short_term("user", message)
-        memory.add_short_term("assistant", answer)
-        memory.auto_learn(message, answer)
-
-    return answer
+def chat_peter(message: str,
+               use_memory: bool = True) -> str:
+    """Chat dengan PETER Brain — routing ke prompt spesialis"""
+    try:
+        from core.brain import PeterBrain
+        if not hasattr(chat_peter, '_brain'):
+            chat_peter._brain = PeterBrain()
+        return chat_peter._brain.think(
+            message, use_memory=use_memory
+        )
+    except Exception as e:
+        print(f"[BRAIN] Fallback ke direct Claude: {e}")
+        import anthropic
+        client   = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        response = client.messages.create(
+            model      = "claude-sonnet-4-6",
+            max_tokens = 4096,
+            system     = f"Kamu adalah PETER, asisten AI milik {USER_NAME}. Jawab dalam Bahasa Indonesia.",
+            messages   = [{"role": "user", "content": message}]
+        )
+        return response.content[0].text
 
 
 # ============================================================
 # MODE 1 — PETER EXECUTOR (Code Engine Level 2)
 # ============================================================
 def run_peter_executor():
+    global USER_NAME, MEMORY_OK, HEAL_OK, VISION_OK
+    global memory, healer, vision
     print("\n[PETER] Peter Executor aktif!")
     print("[PETER] Ketik 'exit' untuk kembali.")
     print("[PETER] Tips:")
@@ -305,12 +262,21 @@ def run_peter_executor():
 
     peter_speak(f"Halo {USER_NAME}! Peter Executor siap.")
 
+    bukan_kode = [
+        "script video", "script youtube", "script tiktok",
+        "script instagram", "script podcast", "script konten",
+        "buat script", "tulis script", "script perdana",
+        "script minggu", "strategi", "analisis", "saran",
+        "bagaimana", "kenapa", "apa itu", "jelaskan",
+        "ceritakan", "rekomendasikan"
+    ]
+
     kata_kode = [
-        "buat", "buat file", "buat grafik", "buat chart",
-        "buat app", "buat program", "buat script", "buat api",
-        "buat web", "buat dashboard", "buat tool", "buat aplikasi",
-        "tulis kode", "jalankan", "hitung", "kalkulasi",
-        "generate", "create", "plot", "analisis data",
+        "buat file", "buat grafik", "buat chart",
+        "buat app", "buat program", "buat api",
+        "buat web", "buat dashboard", "buat tool",
+        "buat aplikasi", "tulis kode", "jalankan",
+        "hitung", "kalkulasi", "plot", "analisis data",
         "download", "scrape", "automasi"
     ]
 
@@ -349,6 +315,44 @@ def run_peter_executor():
                     peter_speak("Baik, saya akan ingat itu.")
                 continue
 
+            # ── Tentukan mode ────────────────────────────
+            bukan_kode = [
+                "script video", "script youtube", "script tiktok",
+                "script instagram", "script podcast", "script konten",
+                "buat script", "tulis script", "script perdana",
+                "script minggu", "strategi", "analisis", "saran",
+                "bagaimana", "kenapa", "apa itu", "jelaskan"
+            ]
+            kata_kode_list = [
+                "buat file", "buat grafik", "buat chart",
+                "buat app", "buat program", "buat api",
+                "buat web", "buat dashboard", "buat tool",
+                "buat aplikasi", "tulis kode", "jalankan",
+                "hitung", "plot", "analisis data",
+                "download", "scrape", "automasi"
+            ]
+            is_bukan_kode = any(b in user_input.lower() for b in bukan_kode)
+            butuh_kode    = any(k in user_input.lower() for k in kata_kode_list)
+            if is_bukan_kode:
+                butuh_kode = False
+
+            is_script = any(k in user_input.lower() for k in [
+                "script video", "script youtube", "buat script",
+                "script perdana", "script minggu", "script konten"
+            ])
+
+            is_app = any(k in user_input.lower() for k in [
+                "buat app", "buat aplikasi", "create app"
+            ])
+
+            is_video_prompt = any(k in user_input.lower() for k in [
+                "buat video prompt", "runway prompt",
+                "kling prompt", "video ai prompt"
+            ])
+
+            # Mode auto
+            auto_mode = False
+
             # Mode auto
             auto_mode = False
             task      = user_input
@@ -357,11 +361,6 @@ def run_peter_executor():
                 task      = user_input[5:].strip()
                 print("[PETER] Mode auto — langsung jalankan!")
 
-            # Buat app lengkap
-            is_app = any(
-                k in user_input.lower()
-                for k in ["buat app", "buat aplikasi", "create app"]
-            )
 
             if is_app:
                 peter_speak("Baik, saya akan buat aplikasinya.")
@@ -406,6 +405,26 @@ def run_peter_executor():
                 else:
                     peter_speak("Maaf, task gagal. Coba perintah yang lebih spesifik.")
 
+               # Cek video generation intent
+            video_keywords = [
+                "buat video prompt", "runway prompt",
+                "kling prompt", "video ai prompt",
+                "generate video prompt"
+            ]
+            is_video_prompt = any(
+                k in user_input.lower()
+                for k in video_keywords
+            )
+
+            if is_video_prompt:
+                from core.brain import PeterBrain
+                brain  = PeterBrain()
+                result = brain.generate_video_prompt(user_input)
+                print(f"\n[PETER] Video Prompt:\n")
+                print(result.get("raw", ""))
+                peter_speak("Video prompt sudah siap!")
+                continue     
+
             else:
                 print("\n[PETER] Berpikir...\n")
                 response = chat_peter(user_input, use_memory=True)
@@ -423,6 +442,7 @@ def run_peter_executor():
 # MODE 2 — CREWAI
 # ============================================================
 def run_crewai(task_description: str = None):
+    global USER_NAME, MEMORY_OK, memory
     print("\n[PETER] Memulai CrewAI Multi-Agent...")
 
     try:
@@ -548,6 +568,7 @@ def run_crewai(task_description: str = None):
 # MODE 3 — COMBINED
 # ============================================================
 def run_combined():
+    global USER_NAME
     print("\n[PETER] Mode Gabungan aktif!\n")
     task = input(f"[{USER_NAME}] Task -> ").strip()
     if not task:
@@ -566,6 +587,7 @@ def run_combined():
 # MODE 4 — VOICE MODE
 # ============================================================
 def run_peter_executor_voice():
+    global USER_NAME, MEMORY_OK, memory
     print("\n[PETER] Voice Mode aktif!")
     print("[PETER] Ucapkan 'keluar' untuk berhenti.\n")
 
@@ -627,6 +649,7 @@ def run_peter_executor_voice():
 # MODE 5 — VISION MODE
 # ============================================================
 def run_vision_mode():
+    global USER_NAME, VISION_OK, vision, MEMORY_OK, memory
     if not VISION_OK:
         print("[PETER] Vision tidak aktif!")
         return
@@ -703,94 +726,117 @@ def run_vision_mode():
 # ============================================================
 # BANNER
 # ============================================================
-def print_banner():
-    print("""
-╔══════════════════════════════════════════════════╗
-║           P E T E R   A I   v2.0               ║
-║    Personal Enhanced Thinking & Execution       ║
-║  CrewAI + Claude + Whisper + Vision + Self-Heal ║
-╚══════════════════════════════════════════════════╝""")
-    mode = "LOCAL (Ollama)" if LOCAL_MODE else "CLOUD (Claude API)"
-    print(f"  Mode    : {mode}")
-    print(f"  User    : {USER_NAME}")
-    print(f"  Vision  : {'OK' if VISION_OK else 'Tidak aktif'}")
-    print(f"  Memory  : {'OK' if MEMORY_OK else 'Tidak aktif'}")
-    print(f"  Heal    : {'OK' if HEAL_OK else 'Tidak aktif'}")
+from peter_identity import BOOT_BANNER, get_greeting
+print(BOOT_BANNER)
+print(get_greeting(USER_NAME))
+# ============================================================
+# MENU UTAMA
+# ============================================================
+def show_menu():
     if MEMORY_OK and memory:
-        stats = memory.get_stats()
-        print(f"  Memori  : {stats['long_term_count']} long term | {stats['episodes_count']} episodes")
-    print(f"  STT     : Whisper large-v3 (GPU)")
-    print(f"  TTS     : ElevenLabs")
-    print(f"  Status  : Semua sistem online")
-    print()
+        try:
+            stats = memory.get_stats()
+            print(f"\n  Memori  : {stats.get('long_term_count',0)} long term | {stats.get('episodes_count',0)} episodes")
+        except Exception:
+            pass
 
-
-# ============================================================
-# MAIN MENU
-# ============================================================
-def main():
-    print_banner()
-
-    while True:
-        print("\n" + "=" * 52)
-        print("  PETER AI v2.0 — Menu Utama")
-        print("=" * 52)
-        print("  [1] Chat & Execute Code   (Peter Executor)")
-        print("  [2] Multi-Agent Team      (CrewAI)")
-        print("  [3] Mode Gabungan         (Executor + CrewAI)")
-        print("  [4] Voice Mode            (Hey Peter!)")
-        print("  [5] Vision Mode           (Wajah & Gesture)")
-        print("  [6] Self-Diagnose         (Monitor & Fix)")
-        print("  [7] Script Writer         (YouTube Long-Form)")
-        print("  [8] Content Automation    (Full Pipeline Auto)")
-        print("  [9] Keluar")
-        print("=" * 52)
-
-        pilihan = input(
-            f"\n[{USER_NAME}] Pilih menu (1-9): "
-        ).strip()
-
-        if pilihan == "1":
-            run_peter_executor()
-
-        elif pilihan == "2":
-            run_crewai()
-
-        elif pilihan == "3":
-            run_combined()
-
-        elif pilihan == "4":
-            aktif = peter_wait_wakeword()
-            if aktif:
-                run_peter_executor_voice()
-
-        elif pilihan == "5":
-            run_vision_mode()
-
-        elif pilihan == "6":
-            if HEAL_OK:
-                from peter_self_heal import run_self_heal_menu
-                run_self_heal_menu()
-            else:
-                print("[PETER] Self-Heal tidak aktif!")
-
-        elif pilihan == "7":
-            from content.script_writer import run_script_writer_interactive
-            run_script_writer_interactive()
-
-        elif pilihan == "8":
-            from content_automation import run_automation_menu
-            run_automation_menu()
-
-        elif pilihan == "9":
-            print(f"\n[PETER] Sampai jumpa, {USER_NAME}!")
-            peter_speak(f"Sampai jumpa {USER_NAME}. PETER offline.")
-            print("[PETER] Semua sistem offline.\n")
-            break
-
-        else:
-            print("[PETER] Pilihan tidak valid. Ketik 1-9.")
+    print("\n" + "─" * 55)
+    print("  PETER AI v2.0 — Command Center")
+    print("─" * 55)
+    print("  [1]  Chat & Execute Code   (Peter Executor)")
+    print("  [2]  Multi-Agent Team      (CrewAI)")
+    print("  [3]  Mode Gabungan         (Executor + CrewAI)")
+    print("  [4]  Voice Mode            (Hey Peter!)")
+    print("  [5]  Vision Mode           (Wajah & Gesture)")
+    print("  [6]  Self-Diagnose         (Monitor & Fix)")
+    print("  [7]  Script Writer         (YouTube Long-Form)")
+    print("  [8]  Content Automation    (Full Pipeline Auto)")
+    print("  [9]  Quantex Trading       (Signal + Portfolio)")
+    print("  [10] App Builder V2        (Web+API+Bot+Deploy)")
+    print("  [11] Master Prompt Engine  (OODA+SWOT+VUCA+E2E)")
+    print("  [0]  Keluar")
+    print("─" * 55)
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            show_menu()
+            pilihan = input(f"\n[{USER_NAME}] Pilih (0-11): ").strip()
+
+            if pilihan == "1":
+                run_peter_executor()
+
+            elif pilihan == "2":
+                run_crewai()
+
+            elif pilihan == "3":
+                run_combined()
+
+            elif pilihan == "4":
+                use_wake = input("[PETER] Pakai wake word 'Hey Peter'? (y/n): ").strip().lower()
+                if use_wake == 'y':
+                    if peter_wait_wakeword():
+                        run_peter_executor_voice()
+                else:
+                    run_peter_executor_voice()
+
+            elif pilihan == "5":
+                run_vision_mode()
+
+            elif pilihan == "6":
+                if HEAL_OK and healer:
+                    print("\n[PETER] Self-Diagnose...")
+                    report = healer.diagnose()
+                    print(report)
+                else:
+                    print("[PETER] Self-Heal tidak aktif!")
+
+            elif pilihan == "7":
+                try:
+                    from content.script_writer import run_script_writer
+                    run_script_writer()
+                except Exception as e:
+                    print(f"[ERROR] Script Writer: {e}")
+
+            elif pilihan == "8":
+                try:
+                    from content.pipeline import run_content_pipeline
+                    run_content_pipeline()
+                except Exception as e:
+                    print(f"[ERROR] Content Pipeline: {e}")
+
+            elif pilihan == "9":
+                try:
+                    run_quantex_menu()
+                except Exception as e:
+                    print(f"[ERROR] Quantex: {e}")
+
+            elif pilihan == "10":
+                try:
+                    from peter_app_builder_v2 import run_app_builder_v2
+                    run_app_builder_v2()
+                except Exception as e:
+                    print(f"[ERROR] App Builder: {e}")
+
+            elif pilihan == "11":
+                try:
+                    from peter_master_prompt import run_master_prompt
+                    run_master_prompt()
+                except Exception as e:
+                    print(f"[ERROR] Master Prompt: {e}")
+
+            elif pilihan == "0":
+                peter_speak(f"Sampai jumpa {USER_NAME}. PETER offline.")
+                print(f"\n[PETER] Sampai jumpa, {USER_NAME}!")
+                print("[PETER] Semua sistem offline.\n")
+                break
+
+            else:
+                print("[PETER] Pilihan tidak valid. Ketik 0-11.")
+
+        except KeyboardInterrupt:
+            print(f"\n\n[PETER] Sampai jumpa, {USER_NAME}!")
+            break
+        except Exception as e:
+            print(f"[ERROR] {e}")
