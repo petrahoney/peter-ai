@@ -17,22 +17,13 @@ venv/
 logs/
 data/
 *.log
-# Debug/test files
-test_*.py
-check_*.py
-fix_*.py
-debug_*.py
-find_error*.py
 
-# Cleanup
-__pycache__/
-*.pyc
-.venv/
-venv/
-.idea/
-.vscode/
-
-# Data
-logs/
-data/
-*.log
+.env
+.env.production
+.env.backup
+client_secrets.json
+*.mp3
+*.jpg
+yolov8n.pt
+venv-new/
+venv-oi/
