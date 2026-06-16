@@ -1,5 +1,4 @@
-import sys
-import os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -17,10 +16,12 @@ HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 USER_NAME = os.getenv("USER_NAME", "Tjerlang")
 
 from core.database_bridge import init_bridge
+from backend.ai_router import get_router
+
 db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
+router = get_router()
 
 app = FastAPI(title="PETER AI Bridge", version="2.3-v4.0")
-
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 class Manager:
@@ -75,10 +76,17 @@ async def ws_endpoint(ws: WebSocket):
             data = json.loads(await ws.receive_text())
             if data.get("type") == "chat":
                 user_msg_id = str(uuid.uuid4())
-                await db.save_message(sid, {"id": user_msg_id, "role": "user", "content": data.get("message", ""), "created_at": datetime.now().isoformat()})
+                query = data.get("message", "")
                 
-                # Simple mock response
-                response = f"PETER: Anda bilang '{data.get('message', '')}' — Terima kasih! 🎯"
+                await db.save_message(sid, {"id": user_msg_id, "role": "user", "content": query, "created_at": datetime.now().isoformat()})
+                
+                # Use AIRouter
+                route_info = router.route_query(query)
+                tier = route_info['tier']
+                model = route_info['model']
+                cost = router.calculate_cost(router.classify_query(query), len(query.split()), 50)
+                
+                response = f"[{tier.upper()}] {model}: '{query}' → Cost: ${cost['total_cost']:.4f}"
                 
                 ai_msg_id = str(uuid.uuid4())
                 await db.save_message(sid, {"id": ai_msg_id, "role": "assistant", "content": response, "created_at": datetime.now().isoformat()})
@@ -91,5 +99,5 @@ async def ws_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge)\n{'='*60}\n📍 http://{HOST}:{PORT}\n💾 Health: http://{HOST}:{PORT}/api/health\n{'='*60}\n")
+    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge + AIRouter)\n{'='*60}\n📍 http://{HOST}:{PORT}\n💾 Health: http://{HOST}:{PORT}/api/health\n{'='*60}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
