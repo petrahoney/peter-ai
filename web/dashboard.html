@@ -46,7 +46,7 @@ header {
 <body>
 
 <header>
-    <div class="logo">🤖 PETER AI v2.0</div>
+    <div class="logo">🤖 PETER AI v2.3-v4.0 (Bridge)</div>
     <div class="status"><span class="online"></span> <span id="status-text">Connecting...</span></div>
 </header>
 
@@ -96,7 +96,7 @@ header {
 let ws = null;
 
 function connect() {
-    ws = new WebSocket('ws://localhost:8080/ws');
+    ws = new WebSocket('ws://localhost:9000/ws');
 
     ws.onopen = () => {
         document.getElementById('status-text').textContent = 'Online';

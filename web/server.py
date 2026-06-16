@@ -1,124 +1,95 @@
-"""
-web/server.py
-FastAPI WebSocket Dashboard Server
-"""
-
 import sys
 import os
-sys.path.append("C:\\peter-ai")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
-import asyncio
-import json
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio, json, uuid
 from datetime import datetime
-from config import DASHBOARD_PORT, USER_NAME
+from pathlib import Path
+from dotenv import load_dotenv
 
-app = FastAPI(title="PETER AI Dashboard")
+load_dotenv('.env.production')
 
+PORT = int(os.getenv("DASHBOARD_PORT", "9000"))
+HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
+USER_NAME = os.getenv("USER_NAME", "Tjerlang")
 
-# ── WebSocket Manager ─────────────────────────────
-class ConnectionManager:
+from core.database_bridge import init_bridge
+db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
+
+app = FastAPI(title="PETER AI Bridge", version="2.3-v4.0")
+
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+class Manager:
     def __init__(self):
         self.active = []
-
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws): 
         await ws.accept()
         self.active.append(ws)
-
-    def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
-
-    async def broadcast(self, message: dict):
+    def disconnect(self, ws): 
+        self.active.remove(ws) if ws in self.active else None
+    async def broadcast(self, msg): 
         for ws in self.active:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                pass
+            try: await ws.send_json(msg)
+            except: pass
 
+manager = Manager()
 
-manager = ConnectionManager()
-
-
-# ── Routes ───────────────────────────────────────
 @app.get("/")
-async def dashboard():
-    html_path = "C:\\peter-ai\\web\\dashboard.html"
-    if os.path.exists(html_path):
-        return FileResponse(html_path)
-    return HTMLResponse("<h1>PETER AI Dashboard</h1><p>dashboard.html tidak ditemukan</p>")
+async def home():
+    html = Path("web/dashboard.html")
+    return FileResponse(html) if html.exists() else HTMLResponse("<h1>PETER AI</h1>")
 
+@app.get("/api/health")
+async def health():
+    return await db.health_check()
 
 @app.get("/api/status")
-async def get_status():
-    return {
-        "status"   : "online",
-        "user"     : USER_NAME,
-        "time"     : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version"  : "2.0"
-    }
+async def status():
+    health = await db.health_check()
+    return {"status": "online", "user": USER_NAME, "version": "2.3-v4.0", "database": health}
 
+@app.get("/api/sessions")
+async def list_sessions():
+    sessions = await db.list_sessions(50)
+    return {"count": len(sessions), "sessions": [{"id": s.get("id") or s.get("_id"), "user": s.get("user"), "created_at": s.get("created_at")} for s in sessions]}
 
-@app.get("/api/files")
-async def get_files():
-    output_dir = "C:\\peter-ai\\data\\outputs"
-    files = []
-    if os.path.exists(output_dir):
-        for f in os.listdir(output_dir):
-            path = os.path.join(output_dir, f)
-            files.append({
-                "name": f,
-                "size": os.path.getsize(path),
-                "date": datetime.fromtimestamp(
-                    os.path.getmtime(path)
-                ).strftime("%Y-%m-%d %H:%M")
-            })
-    return {"files": files}
-
+@app.get("/api/sessions/{sid}/messages")
+async def get_messages(sid: str):
+    msgs = await db.get_messages(sid, 100)
+    return {"session_id": sid, "count": len(msgs), "messages": [{"id": m.get("id") or m.get("_id"), "role": m.get("role"), "content": m.get("content"), "created_at": m.get("created_at")} for m in msgs]}
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    await websocket.send_json({
-        "type"   : "connected",
-        "message": f"PETER AI Dashboard terhubung — Halo {USER_NAME}!"
-    })
+async def ws_endpoint(ws: WebSocket):
+    await manager.connect(ws)
+    sid = str(uuid.uuid4())
+    
+    await db.save_session(sid, {"id": sid, "user": USER_NAME, "created_at": datetime.now().isoformat(), "version": "2.3-v4.0"})
+    await ws.send_json({"type": "connected", "message": f"Halo {USER_NAME}! PETER AI siap.", "session_id": sid})
+    
     try:
         while True:
-            data = await websocket.receive_text()
-            msg  = json.loads(data)
-
-            if msg.get("type") == "chat":
-                # Proses pesan chat
-                from core.brain import PeterBrain
-                brain    = PeterBrain()
-                response = brain.think(msg.get("message", ""))
-                await manager.broadcast({
-                    "type"   : "response",
-                    "message": response,
-                    "time"   : datetime.now().strftime("%H:%M:%S")
-                })
-
-            elif msg.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-
+            data = json.loads(await ws.receive_text())
+            if data.get("type") == "chat":
+                user_msg_id = str(uuid.uuid4())
+                await db.save_message(sid, {"id": user_msg_id, "role": "user", "content": data.get("message", ""), "created_at": datetime.now().isoformat()})
+                
+                # Simple mock response
+                response = f"PETER: Anda bilang '{data.get('message', '')}' — Terima kasih! 🎯"
+                
+                ai_msg_id = str(uuid.uuid4())
+                await db.save_message(sid, {"id": ai_msg_id, "role": "assistant", "content": response, "created_at": datetime.now().isoformat()})
+                
+                await manager.broadcast({"type": "response", "message": response, "time": datetime.now().strftime("%H:%M:%S"), "message_id": ai_msg_id, "session_id": sid})
+            elif data.get("type") == "ping":
+                await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-
-def start_server():
-    """Jalankan dashboard server"""
-    import uvicorn
-    print(f"\n[DASHBOARD] Server berjalan di http://localhost:{DASHBOARD_PORT}")
-    print(f"[DASHBOARD] Buka browser dan akses URL di atas")
-    uvicorn.run(
-        app,
-        host = "0.0.0.0",
-        port = DASHBOARD_PORT,
-        log_level = "warning"
-    )
-
+        manager.disconnect(ws)
 
 if __name__ == "__main__":
-    start_server()
+    import uvicorn
+    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge)\n{'='*60}\n📍 http://{HOST}:{PORT}\n💾 Health: http://{HOST}:{PORT}/api/health\n{'='*60}\n")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
