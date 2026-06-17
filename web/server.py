@@ -1,7 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio, json, uuid
@@ -18,10 +18,13 @@ USER_NAME = os.getenv("USER_NAME", "Tjerlang")
 from core.database_bridge import init_bridge
 from backend.ai_router import get_router
 from backend.llm_client import get_llm_client
+from backend.auth_service import get_auth_service
+from backend.auth_models import UserRegister, UserLogin
 
 db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
 router = get_router()
 llm = get_llm_client()
+auth = get_auth_service()
 
 app = FastAPI(title="PETER AI Bridge", version="2.3-v4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -41,6 +44,8 @@ class Manager:
 
 manager = Manager()
 
+# ===== BASIC ENDPOINTS =====
+
 @app.get("/")
 async def home():
     html = Path("web/dashboard.html")
@@ -55,6 +60,81 @@ async def status():
     health = await db.health_check()
     return {"status": "online", "user": USER_NAME, "version": "2.3-v4.0", "database": health}
 
+# ===== AUTH ENDPOINTS =====
+
+@app.post("/api/auth/register")
+async def register(user: UserRegister):
+    """Register new user"""
+    success, message, user_obj = await auth.register_user(user)
+    
+    if not success:
+        return {"success": False, "error": message}
+    
+    return {
+        "success": True,
+        "message": message,
+        "user": user_obj.to_response()
+    }
+
+@app.post("/api/auth/login")
+async def login(login: UserLogin):
+    """Login user"""
+    success, message, result = await auth.login_user(login)
+    
+    if not success:
+        return {"success": False, "error": message}
+    
+    return {
+        "success": True,
+        "message": message,
+        "access_token": result['access_token'],
+        "user": {
+            "id": result['user_id'],
+            "email": result['email'],
+            "username": result['username'],
+            "tier": result['tier']
+        }
+    }
+
+@app.get("/api/auth/me")
+async def get_me(authorization: str = Header(None)):
+    """Get current user info"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    user = await auth.get_user(user_id)
+    sub = await auth.get_user_subscription(user_id)
+    
+    return {
+        "success": True,
+        "user": {
+            "id": user['_id'],
+            "email": user['email'],
+            "username": user['username'],
+            "full_name": user.get('full_name', ''),
+            "tier": sub.get('tier', 'free') if sub else 'free'
+        }
+    }
+
+@app.post("/api/auth/verify")
+async def verify_token(authorization: str = Header(None)):
+    """Verify token"""
+    if not authorization:
+        return {"success": False, "valid": False}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    return {"success": True, "valid": is_valid, "user_id": user_id}
+
+# ===== DATA ENDPOINTS =====
+
 @app.get("/api/sessions")
 async def list_sessions():
     sessions = await db.list_sessions(50)
@@ -64,6 +144,8 @@ async def list_sessions():
 async def get_messages(sid: str):
     msgs = await db.get_messages(sid, 100)
     return {"session_id": sid, "count": len(msgs), "messages": [{"id": m.get("id") or m.get("_id"), "role": m.get("role"), "content": m.get("content"), "created_at": m.get("created_at")} for m in msgs]}
+
+# ===== WEBSOCKET =====
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -83,21 +165,17 @@ async def ws_endpoint(ws: WebSocket):
                 await db.save_message(sid, {"id": user_msg_id, "role": "user", "content": query, "created_at": datetime.now().isoformat()})
                 
                 try:
-                    # Route query
                     route_info = router.route_query(query)
                     tier = route_info['tier']
                     model = route_info['model']
                     provider = route_info['provider']
                     
-                    # Call LLM
                     llm_result = await llm.call(provider, query, max_tokens=200)
                     
-                    # Calculate cost
                     input_tokens = llm_result.get('input_tokens', len(query.split()))
                     output_tokens = llm_result.get('output_tokens', 50)
                     cost = router.calculate_cost(router.classify_query(query), input_tokens, output_tokens)
                     
-                    # Format response
                     if llm_result['success']:
                         response = f"[{tier.upper()} | {model}]\n{llm_result['response']}\n\n💰 Cost: ${cost['total_cost']:.6f}"
                     else:
@@ -119,5 +197,5 @@ async def ws_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge + AIRouter + LLM)\n{'='*60}\n📍 http://{HOST}:{PORT}\n{'='*60}\n")
+    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Auth Enabled)\n{'='*60}\n📍 http://{HOST}:{PORT}\n{'='*60}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
