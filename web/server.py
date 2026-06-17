@@ -17,9 +17,11 @@ USER_NAME = os.getenv("USER_NAME", "Tjerlang")
 
 from core.database_bridge import init_bridge
 from backend.ai_router import get_router
+from backend.llm_client import get_llm_client
 
 db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
 router = get_router()
+llm = get_llm_client()
 
 app = FastAPI(title="PETER AI Bridge", version="2.3-v4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -80,24 +82,42 @@ async def ws_endpoint(ws: WebSocket):
                 
                 await db.save_message(sid, {"id": user_msg_id, "role": "user", "content": query, "created_at": datetime.now().isoformat()})
                 
-                # Use AIRouter
-                route_info = router.route_query(query)
-                tier = route_info['tier']
-                model = route_info['model']
-                cost = router.calculate_cost(router.classify_query(query), len(query.split()), 50)
+                try:
+                    # Route query
+                    route_info = router.route_query(query)
+                    tier = route_info['tier']
+                    model = route_info['model']
+                    provider = route_info['provider']
+                    
+                    # Call LLM
+                    llm_result = await llm.call(provider, query, max_tokens=200)
+                    
+                    # Calculate cost
+                    input_tokens = llm_result.get('input_tokens', len(query.split()))
+                    output_tokens = llm_result.get('output_tokens', 50)
+                    cost = router.calculate_cost(router.classify_query(query), input_tokens, output_tokens)
+                    
+                    # Format response
+                    if llm_result['success']:
+                        response = f"[{tier.upper()} | {model}]\n{llm_result['response']}\n\n💰 Cost: ${cost['total_cost']:.6f}"
+                    else:
+                        response = f"[{tier.upper()} | {model}]\n{llm_result['response']}\n💰 Cost: ${cost['total_cost']:.6f}"
                 
-                response = f"[{tier.upper()}] {model}: '{query}' → Cost: ${cost['total_cost']:.4f}"
+                except Exception as e:
+                    response = f"Error: {str(e)}"
                 
                 ai_msg_id = str(uuid.uuid4())
                 await db.save_message(sid, {"id": ai_msg_id, "role": "assistant", "content": response, "created_at": datetime.now().isoformat()})
                 
                 await manager.broadcast({"type": "response", "message": response, "time": datetime.now().strftime("%H:%M:%S"), "message_id": ai_msg_id, "session_id": sid})
+            
             elif data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
+    
     except WebSocketDisconnect:
         manager.disconnect(ws)
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge + AIRouter)\n{'='*60}\n📍 http://{HOST}:{PORT}\n💾 Health: http://{HOST}:{PORT}/api/health\n{'='*60}\n")
+    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Bridge + AIRouter + LLM)\n{'='*60}\n📍 http://{HOST}:{PORT}\n{'='*60}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
