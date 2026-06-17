@@ -20,6 +20,8 @@ from backend.ai_router import get_router
 from backend.llm_client import get_llm_client
 from backend.auth_service import get_auth_service
 from backend.auth_models import UserRegister, UserLogin
+from backend.workspace_service import get_workspace_service
+from backend.workspace_models import WorkspaceCreate, TeamCreate, TeamMemberAdd
 
 db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
 router = get_router()
@@ -144,6 +146,129 @@ async def list_sessions():
 async def get_messages(sid: str):
     msgs = await db.get_messages(sid, 100)
     return {"session_id": sid, "count": len(msgs), "messages": [{"id": m.get("id") or m.get("_id"), "role": m.get("role"), "content": m.get("content"), "created_at": m.get("created_at")} for m in msgs]}
+
+# ===== WORKSPACE ENDPOINTS =====
+
+@app.post("/api/workspaces")
+async def create_workspace(workspace: WorkspaceCreate, authorization: str = Header(None)):
+    """Create new workspace"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    success, message, ws = await ws_service.create_workspace(workspace, user_id)
+    
+    return {"success": success, "message": message, "workspace": ws}
+
+@app.get("/api/workspaces")
+async def list_workspaces(authorization: str = Header(None)):
+    """List user's workspaces"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    workspaces = await ws_service.list_user_workspaces(user_id)
+    
+    return {"success": True, "count": len(workspaces), "workspaces": workspaces}
+
+@app.get("/api/workspaces/{workspace_id}")
+async def get_workspace(workspace_id: str, authorization: str = Header(None)):
+    """Get workspace details"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    ws = await ws_service.get_workspace(workspace_id, user_id)
+    
+    if not ws:
+        return {"success": False, "error": "Workspace not found"}
+    
+    return {"success": True, "workspace": ws}
+
+# ===== TEAM ENDPOINTS =====
+
+@app.post("/api/teams")
+async def create_team(team: TeamCreate, authorization: str = Header(None)):
+    """Create team in workspace"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    success, message, t = await ws_service.create_team(team, user_id)
+    
+    return {"success": success, "message": message, "team": t}
+
+@app.post("/api/teams/{team_id}/members")
+async def add_team_member(team_id: str, member: TeamMemberAdd, authorization: str = Header(None)):
+    """Add member to team"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    success, message = await ws_service.add_team_member(team_id, user_id, member.user_id, member.role)
+    
+    return {"success": success, "message": message}
+
+# ===== RESOURCE SHARING =====
+
+@app.post("/api/share")
+async def share_resource(share_data: dict, authorization: str = Header(None)):
+    """Share resource with user/team"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    auth = get_auth_service()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    ws_service = get_workspace_service()
+    success, message = await ws_service.share_resource(
+        share_data.get("resource_type"),
+        share_data.get("resource_id"),
+        user_id,
+        share_data.get("shared_with"),
+        share_data.get("permission", "view")
+    )
+    
+    return {"success": success, "message": message}
 
 # ===== WEBSOCKET =====
 
