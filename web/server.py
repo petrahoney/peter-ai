@@ -22,11 +22,20 @@ from backend.auth_service import get_auth_service
 from backend.auth_models import UserRegister, UserLogin
 from backend.workspace_service import get_workspace_service
 from backend.workspace_models import WorkspaceCreate, TeamCreate, TeamMemberAdd
+from backend.notification_service import get_notification_service
+from backend.notification_models import NotificationCreate
+from backend.analytics_service import get_analytics_service
+from backend.analytics_models import UsageMetric
+from backend.cache_service import get_cache
 
 db = init_bridge(mongo_url=os.getenv("MONGO_URL"))
 router = get_router()
 llm = get_llm_client()
 auth = get_auth_service()
+ws_service = get_workspace_service()
+notif_service = get_notification_service()
+analytics = get_analytics_service()
+cache = get_cache()
 
 app = FastAPI(title="PETER AI Bridge", version="2.3-v4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -100,7 +109,7 @@ async def login(login: UserLogin):
 
 @app.get("/api/auth/me")
 async def get_me(authorization: str = Header(None)):
-    """Get current user info"""
+    """Get current user info (cached)"""
     if not authorization:
         return {"success": False, "error": "Missing token"}
     
@@ -110,10 +119,18 @@ async def get_me(authorization: str = Header(None)):
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
+    # Check cache first
+    cache_key = f"user:{user_id}"
+    cached = cache.get(cache_key)
+    
+    if cached:
+        return cached
+    
     user = await auth.get_user(user_id)
     sub = await auth.get_user_subscription(user_id)
     
-    return {
+    # Cache result
+    result = {
         "success": True,
         "user": {
             "id": user['_id'],
@@ -123,6 +140,8 @@ async def get_me(authorization: str = Header(None)):
             "tier": sub.get('tier', 'free') if sub else 'free'
         }
     }
+    cache.set(cache_key, result, ttl_seconds=600)
+    return result
 
 @app.post("/api/auth/verify")
 async def verify_token(authorization: str = Header(None)):
@@ -135,18 +154,6 @@ async def verify_token(authorization: str = Header(None)):
     
     return {"success": True, "valid": is_valid, "user_id": user_id}
 
-# ===== DATA ENDPOINTS =====
-
-@app.get("/api/sessions")
-async def list_sessions():
-    sessions = await db.list_sessions(50)
-    return {"count": len(sessions), "sessions": [{"id": s.get("id") or s.get("_id"), "user": s.get("user"), "created_at": s.get("created_at")} for s in sessions]}
-
-@app.get("/api/sessions/{sid}/messages")
-async def get_messages(sid: str):
-    msgs = await db.get_messages(sid, 100)
-    return {"session_id": sid, "count": len(msgs), "messages": [{"id": m.get("id") or m.get("_id"), "role": m.get("role"), "content": m.get("content"), "created_at": m.get("created_at")} for m in msgs]}
-
 # ===== WORKSPACE ENDPOINTS =====
 
 @app.post("/api/workspaces")
@@ -156,15 +163,12 @@ async def create_workspace(workspace: WorkspaceCreate, authorization: str = Head
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
     success, message, ws = await ws_service.create_workspace(workspace, user_id)
-    
     return {"success": success, "message": message, "workspace": ws}
 
 @app.get("/api/workspaces")
@@ -174,15 +178,12 @@ async def list_workspaces(authorization: str = Header(None)):
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
     workspaces = await ws_service.list_user_workspaces(user_id)
-    
     return {"success": True, "count": len(workspaces), "workspaces": workspaces}
 
 @app.get("/api/workspaces/{workspace_id}")
@@ -192,13 +193,11 @@ async def get_workspace(workspace_id: str, authorization: str = Header(None)):
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
     ws = await ws_service.get_workspace(workspace_id, user_id)
     
     if not ws:
@@ -215,15 +214,12 @@ async def create_team(team: TeamCreate, authorization: str = Header(None)):
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
     success, message, t = await ws_service.create_team(team, user_id)
-    
     return {"success": success, "message": message, "team": t}
 
 @app.post("/api/teams/{team_id}/members")
@@ -233,42 +229,183 @@ async def add_team_member(team_id: str, member: TeamMemberAdd, authorization: st
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
     success, message = await ws_service.add_team_member(team_id, user_id, member.user_id, member.role)
-    
     return {"success": success, "message": message}
 
-# ===== RESOURCE SHARING =====
+# ===== NOTIFICATION ENDPOINTS =====
 
-@app.post("/api/share")
-async def share_resource(share_data: dict, authorization: str = Header(None)):
-    """Share resource with user/team"""
+@app.post("/api/notifications")
+async def create_notification(notification_data: dict, authorization: str = Header(None)):
+    """Create notification"""
     if not authorization:
         return {"success": False, "error": "Missing token"}
     
     token = authorization.replace("Bearer ", "").strip()
-    auth = get_auth_service()
     is_valid, user_id = await auth.verify_token(token)
     
     if not is_valid:
         return {"success": False, "error": "Invalid token"}
     
-    ws_service = get_workspace_service()
-    success, message = await ws_service.share_resource(
-        share_data.get("resource_type"),
-        share_data.get("resource_id"),
-        user_id,
-        share_data.get("shared_with"),
-        share_data.get("permission", "view")
+    notif = NotificationCreate(
+        user_id=notification_data.get("user_id", user_id),
+        notification_type=notification_data.get("notification_type", "system"),
+        title=notification_data.get("title", ""),
+        message=notification_data.get("message", ""),
+        send_email=notification_data.get("send_email", False)
     )
     
+    success, message, n = await notif_service.create_notification(notif)
+    return {"success": success, "message": message, "notification": n}
+
+@app.get("/api/notifications")
+async def get_notifications(authorization: str = Header(None)):
+    """Get user notifications"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    notifications = await notif_service.get_notifications(user_id, 50)
+    unread_count = await notif_service.get_unread_count(user_id)
+    
+    return {"success": True, "notifications": notifications, "unread_count": unread_count}
+
+# ===== ANALYTICS ENDPOINTS =====
+
+@app.get("/api/analytics/user-stats")
+async def get_user_stats(authorization: str = Header(None)):
+    """Get user analytics"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    stats = await analytics.get_user_stats(user_id)
+    return {"success": True, "stats": stats}
+
+@app.get("/api/analytics/daily")
+async def get_daily_stats(days: int = 30, authorization: str = Header(None)):
+    """Get daily breakdown"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    daily = await analytics.get_daily_stats(user_id, days)
+    return {"success": True, "daily_stats": daily}
+
+@app.post("/api/analytics/track")
+async def track_usage(metric_data: dict, authorization: str = Header(None)):
+    """Track usage metric"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    metric = UsageMetric(
+        user_id=user_id,
+        workspace_id=metric_data.get("workspace_id", ""),
+        metric_type=metric_data.get("metric_type", "api_call"),
+        value=metric_data.get("value", 1.0),
+        metadata=metric_data.get("metadata", {})
+    )
+    
+    success, message = await analytics.track_usage(metric)
     return {"success": success, "message": message}
+
+# ===== ADMIN ENDPOINTS =====
+
+@app.get("/api/admin/dashboard")
+async def admin_dashboard(authorization: str = Header(None)):
+    """Admin dashboard overview"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    try:
+        total_users = await db.db.users.count_documents({})
+        total_workspaces = await db.db.workspaces.count_documents({})
+        total_teams = await db.db.teams.count_documents({})
+        total_messages = await db.db.messages.count_documents({})
+        
+        recent_users = await db.db.users.find({}).sort("created_at", -1).limit(10).to_list(10)
+        recent_messages = await db.db.messages.find({}).sort("created_at", -1).limit(10).to_list(10)
+        
+        return {
+            "success": True,
+            "dashboard": {
+                "total_users": total_users,
+                "total_workspaces": total_workspaces,
+                "total_teams": total_teams,
+                "total_messages": total_messages,
+                "recent_users": recent_users,
+                "recent_messages": recent_messages
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/admin/system-health")
+async def system_health(authorization: str = Header(None)):
+    """System health check"""
+    if not authorization:
+        return {"success": False, "error": "Missing token"}
+    
+    token = authorization.replace("Bearer ", "").strip()
+    is_valid, user_id = await auth.verify_token(token)
+    
+    if not is_valid:
+        return {"success": False, "error": "Invalid token"}
+    
+    health = await db.health_check()
+    
+    return {
+        "success": True,
+        "health": {
+            "status": "healthy" if health.get("mongo") else "unhealthy",
+            "mongodb": health.get("mongo", False),
+            "filesystem": health.get("file", False),
+            "timestamp": datetime.now().isoformat()
+        }
+    }
+
+# ===== DATA ENDPOINTS =====
+
+@app.get("/api/sessions")
+async def list_sessions():
+    sessions = await db.list_sessions(50)
+    return {"count": len(sessions), "sessions": [{"id": s.get("id") or s.get("_id"), "user": s.get("user"), "created_at": s.get("created_at")} for s in sessions]}
+
+@app.get("/api/sessions/{sid}/messages")
+async def get_messages(sid: str):
+    msgs = await db.get_messages(sid, 100)
+    return {"session_id": sid, "count": len(msgs), "messages": [{"id": m.get("id") or m.get("_id"), "role": m.get("role"), "content": m.get("content"), "created_at": m.get("created_at")} for m in msgs]}
 
 # ===== WEBSOCKET =====
 
@@ -322,5 +459,5 @@ async def ws_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Auth Enabled)\n{'='*60}\n📍 http://{HOST}:{PORT}\n{'='*60}\n")
+    print(f"\n{'='*60}\n🚀 PETER AI v2.3-v4.0 (Phase 5: Advanced Features)\n{'='*60}\n📍 http://{HOST}:{PORT}\n{'='*60}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
